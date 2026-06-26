@@ -1,0 +1,20 @@
+# Synthea JAR (downloaded by scripts/01_download_synthea.sh)
+tools/
+
+# Generated data and databases
+data/synthea_output/
+data/omop.duckdb
+data/omop.duckdb.wal
+
+# OMOP Athena vocabularies (large; downloaded manually)
+data/vocab/
+
+# Run logs and analysis results
+logs/
+results/
+
+# renv library (the lockfile renv.lock IS committed; the library is not)
+renv/library/
+renv/local/
+renv/cellar/
+renv/staging/

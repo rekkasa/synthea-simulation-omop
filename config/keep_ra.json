@@ -1,0 +1,37 @@
+{
+  "name": "Keep Rheumatoid Arthritis Patients",
+  "remarks": [
+    "Synthea 'keep module' used with the -k command line flag.",
+    "After a patient is fully simulated, Synthea runs this module against the",
+    "finished record. The Guard state below only allows the module to reach the",
+    "Keep state when the patient has EVER had a Rheumatoid arthritis condition",
+    "(SNOMED-CT 69896004, as emitted by Synthea's rheumatoid_arthritis module).",
+    "Patients who never satisfy the Guard are discarded and never exported,",
+    "yielding an RA-only cohort. Patients whose RA later entered remission are",
+    "still kept, because the downstream OMOP analyses define the cohort by",
+    "condition occurrence rather than by active status at the end of life."
+  ],
+  "states": {
+    "Initial": {
+      "type": "Initial",
+      "direct_transition": "Keep_If_Rheumatoid_Arthritis"
+    },
+    "Keep_If_Rheumatoid_Arthritis": {
+      "type": "Guard",
+      "allow": {
+        "condition_type": "Prior Condition",
+        "codes": [
+          {
+            "system": "SNOMED-CT",
+            "code": "69896004",
+            "display": "Rheumatoid arthritis (disorder)"
+          }
+        ]
+      },
+      "direct_transition": "Keep"
+    },
+    "Keep": {
+      "type": "Terminal"
+    }
+  }
+}
