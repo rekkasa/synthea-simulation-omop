@@ -6,21 +6,28 @@
 #
 # Downloads the pinned Synthea "with dependencies" JAR from GitHub Releases.
 # The download is idempotent: if the JAR is already present it is left alone.
-# Fails fast with a clear message if Java is not available, since Synthea
-# requires a JRE/JDK to run.
+# Fails fast with a clear message if Java is not available.
 #
-# Parameters (read from the environment, all optional):
-#   SYNTHEA_VERSION   Synthea release to download (default: 3.3.0)
-#   TOOLS_DIR         Directory to store the JAR        (default: tools)
-#
+# Configuration is read from config.yaml (see project root).
+
 set -euo pipefail
 
-# Run from the project root regardless of the caller's working directory.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-SYNTHEA_VERSION="${SYNTHEA_VERSION:-3.3.0}"
-TOOLS_DIR="${TOOLS_DIR:-tools}"
+# --- Read config (env-var overrides take precedence) ------------------------
+config_val() {
+  local key="$1"
+  local env_var="${2:-}"
+  if [[ -n "${env_var:-}" ]] && [[ -n "${!env_var:-}" ]]; then
+    echo "${!env_var}"
+  else
+    Rscript scripts/lib/read_config.R "$key"
+  fi
+}
+
+SYNTHEA_VERSION="${SYNTHEA_VERSION:-$(config_val synthea.version SYNTHEA_VERSION)}"
+TOOLS_DIR="${TOOLS_DIR:-$(config_val synthea.jar_dir TOOLS_DIR)}"
 JAR_PATH="${TOOLS_DIR}/synthea-with-dependencies.jar"
 DOWNLOAD_URL="https://github.com/synthetichealth/synthea/releases/download/v${SYNTHEA_VERSION}/synthea-with-dependencies.jar"
 

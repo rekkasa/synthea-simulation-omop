@@ -7,48 +7,42 @@
 # Generates an ADULT, RHEUMATOID-ARTHRITIS-ONLY synthetic cohort with Synthea
 # and exports it as CSV. RA-only is enforced by the keep module
 # (config/keep_ra.json, passed via -k); adults-only is enforced by the age
-# range filter (-a 45-120).
+# range filter read from config.yaml.
 #
-# Synthea's -k flag already keeps generating internally until the requested
-# population of *matching* patients is produced, so a single invocation is
-# normally enough. The loop below is a safety net + accumulator: it re-runs
-# Synthea with a fresh (deterministic) seed each iteration and merges the CSV
-# output until the cumulative count of distinct adult RA patients reaches
-# N_PATIENTS, guarding against an infinite loop with MAX_ITERATIONS.
+# The module override (config/modules/rheumatoid_arthritis.json) forces every
+# adult onto the RA onset path, cutting wasted simulation by ~100x.
 #
-# Generation speed: the built-in RA module only gives ~1% of simulated adults
-# rheumatoid arthritis, so the RA-only keep module would otherwise discard ~99%
-# of all simulation work. We override that module with config/modules/
-# rheumatoid_arthritis.json (loaded via -d), which forces every adult onto the
-# RA onset path. A same-named local module replaces the built-in one, so this is
-# a drop-in override; only the onset incidence changes, not the RA disease model,
-# so the kept active-RA cohort keeps the same characteristics with far less
-# wasted simulation. See that file's remarks for the full rationale.
-#
-# Parameters (read from the environment, all optional):
-#   N_PATIENTS      Target number of adult RA patients   (default: 1000)
-#   SEED            Base random seed (reproducible)       (default: 20240101)
-#   STATE           US state for demographics             (default: Massachusetts)
-#   OUTPUT_DIR      Base output directory                 (default: data/synthea_output)
-#   MODULE_DIR      Local Synthea module override dir     (default: config/modules)
-#   MAX_ITERATIONS  Safety cap on generation batches      (default: 50)
-#
+# Configuration is read from config.yaml (see project root).
+
 set -euo pipefail
 
-# Run from the project root regardless of the caller's working directory.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-N_PATIENTS="${N_PATIENTS:-1000}"
-SEED="${SEED:-20240101}"
-STATE="${STATE:-Massachusetts}"
-OUTPUT_DIR="${OUTPUT_DIR:-data/synthea_output}"
-MODULE_DIR="${MODULE_DIR:-config/modules}"
-MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
+# --- Read config (env-var overrides take precedence) ------------------------
+config_val() {
+  local key="$1"
+  local env_var="${2:-}"
+  if [[ -n "${env_var:-}" ]] && [[ -n "${!env_var:-}" ]]; then
+    echo "${!env_var}"
+  else
+    Rscript scripts/lib/read_config.R "$key"
+  fi
+}
+
+N_PATIENTS="$(config_val simulation.n_patients    N_PATIENTS)"
+SEED="$(config_val simulation.seed               SEED)"
+STATE="$(config_val simulation.state             STATE)"
+MAX_ITERATIONS="$(config_val simulation.max_iterations MAX_ITERATIONS)"
+MODULE_DIR="$(config_val simulation.module_dir   MODULE_DIR)"
+AGE_MIN="$(config_val simulation.age_min         AGE_MIN)"
+AGE_MAX="$(config_val simulation.age_max         AGE_MAX)"
+SYNTHEA_CSV_DIR="$(config_val etl.synthea_csv_dir SYNTHEA_CSV_DIR)"
 
 JAR_PATH="tools/synthea-with-dependencies.jar"
 KEEP_MODULE="config/keep_ra.json"
-CSV_DIR="${OUTPUT_DIR}/csv"
+OUTPUT_DIR="$(dirname "$SYNTHEA_CSV_DIR")"
+CSV_DIR="$SYNTHEA_CSV_DIR"
 RA_SNOMED_CODE="69896004"
 
 # --- Preconditions ---------------------------------------------------------
@@ -60,8 +54,6 @@ if [[ ! -f "$KEEP_MODULE" ]]; then
   echo "ERROR: keep module '${KEEP_MODULE}' not found." >&2
   exit 1
 fi
-# Synthea's -d loads *every* .json in this directory as a module, so it must be
-# a dedicated module dir (not config/, which also holds the keep module).
 if [[ ! -d "$MODULE_DIR" ]]; then
   echo "ERROR: module override dir '${MODULE_DIR}' not found." >&2
   exit 1
@@ -73,10 +65,6 @@ echo "Synthea run log: ${LOG_FILE}"
 
 # --- Helpers ---------------------------------------------------------------
 
-# Count distinct PATIENT ids in a Synthea conditions.csv that carry the RA
-# SNOMED code. Column positions are discovered from the header so the function
-# is robust to Synthea adding/removing columns. DESCRIPTION (which may contain
-# commas) is the last column, so commas there never shift PATIENT or CODE.
 count_ra_patients() {
   local conditions="$1"
   if [[ ! -f "$conditions" ]]; then
@@ -105,8 +93,6 @@ count_ra_patients() {
   ' "$conditions"
 }
 
-# Merge every *.csv from a batch directory into the cumulative CSV_DIR,
-# keeping a single header row per file and appending subsequent data rows.
 merge_csv() {
   local src_dir="$1"
   local dst_dir="$2"
@@ -127,13 +113,13 @@ merge_csv() {
 iteration=0
 total=0
 
-echo "Target: ${N_PATIENTS} adult RA patients | state=${STATE} | base seed=${SEED}"
+echo "Target: ${N_PATIENTS} adult RA patients | state=${STATE} | seed=${SEED} | age=${AGE_MIN}-${AGE_MAX}"
 
 while (( total < N_PATIENTS )); do
   iteration=$(( iteration + 1 ))
   if (( iteration > MAX_ITERATIONS )); then
-    echo "ERROR: reached MAX_ITERATIONS (${MAX_ITERATIONS}) with only ${total} adult RA patients (< ${N_PATIENTS})." >&2
-    echo "Increase MAX_ITERATIONS, or check the keep module / Synthea output in ${LOG_FILE}." >&2
+    echo "ERROR: reached MAX_ITERATIONS (${MAX_ITERATIONS}) with only ${total} RA patients." >&2
+    echo "Increase simulation.max_iterations in config.yaml, or check ${LOG_FILE}." >&2
     exit 1
   fi
 
@@ -148,7 +134,7 @@ while (( total < N_PATIENTS )); do
   java -jar "$JAR_PATH" \
     -p "$remaining" \
     -s "$iter_seed" \
-    -a 45-120 \
+    -a "${AGE_MIN}-${AGE_MAX}" \
     -d "$MODULE_DIR" \
     -k "$KEEP_MODULE" \
     --exporter.baseDirectory "$batch_dir" \
@@ -167,5 +153,71 @@ while (( total < N_PATIENTS )); do
   total="$(count_ra_patients "${CSV_DIR}/conditions.csv")"
   echo "[iter ${iteration}] cumulative adult RA patients: ${total} / ${N_PATIENTS}"
 done
+
+# --- Strip non-RA patients from CSV exports ----------------------------------
+# Synthea's -k keep module controls generation count but does NOT filter CSV
+# output. Patients who never got RA still appear in every CSV file. Remove
+# their rows so the exported cohort exactly matches the RA count.
+filter_ra_only() {
+  local csv_dir="$1"
+  local racode="$2"
+
+  local work_dir
+  work_dir="$(mktemp -d)"
+
+  # Collect RA patient IDs from conditions.csv (column PATIENT).
+  awk -F',' -v rc="$racode" '
+    NR == 1 {
+      for (i = 1; i <= NF; i++) { h = $i; gsub(/"/, "", h); if (h == "PATIENT") p = i; if (h == "CODE") c = i }
+      next
+    }
+    { code = $c; gsub(/"/, "", code); pid = $p; gsub(/"/, "", pid)
+      if (code == rc) ids[pid] = 1 }
+    END { for (id in ids) print id }
+  ' "${csv_dir}/conditions.csv" > "${work_dir}/ra_ids"
+
+  local ra_count
+  ra_count="$(wc -l < "${work_dir}/ra_ids")"
+  if [[ "$ra_count" -eq 0 ]]; then
+    echo "ERROR: no RA patients found in conditions.csv after generation." >&2
+    rm -rf "$work_dir"
+    return 1
+  fi
+
+  echo "Post-filtering: keeping only ${ra_count} RA patients across all CSV files."
+
+  for f in "${csv_dir}"/*.csv; do
+    [[ -e "$f" ]] || continue
+    local base
+    base="$(basename "$f")"
+
+    # Discover PATIENT column position from header.
+    # patients.csv uses "Id" instead of "PATIENT".
+    local pat_col
+    pat_col=$(head -1 "$f" | awk -F',' '{
+      for (i = 1; i <= NF; i++) { h = $i; gsub(/"/, "", h); if (h == "PATIENT" || h == "Id") { print i; exit } }
+    }')
+
+    if [[ -z "$pat_col" ]]; then
+      # Files without a PATIENT column (organizations, providers, payers) are left as-is.
+      continue
+    fi
+
+    # Keep header + rows whose PATIENT column value is in the RA set.
+    # NR==FNR: processing the ID file (first argument).
+    # FNR==1 && NR!=FNR: header of the CSV (second argument).
+    # Otherwise: CSV data row — print only if PATIENT is in the ID set.
+    awk -F',' -v col="$pat_col" '
+      NR == FNR          { ids[$0] = 1; next }
+      FNR == 1           { print; next }
+      { pid = $col; gsub(/"/, "", pid); if (pid in ids) print }
+    ' "${work_dir}/ra_ids" "$f" > "${work_dir}/${base}"
+    mv "${work_dir}/${base}" "$f"
+  done
+
+  rm -rf "$work_dir"
+}
+
+filter_ra_only "$CSV_DIR" "$RA_SNOMED_CODE"
 
 echo "Done. ${total} adult RA patients exported to '${CSV_DIR}'."

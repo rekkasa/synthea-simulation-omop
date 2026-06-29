@@ -14,28 +14,27 @@
 #   3. LoadSyntheaTables      - load the raw Synthea CSVs into staging
 #   4. LoadVocabFromCsv       - load the OMOP Athena vocabulary CSVs
 #   5. CreateMapAndRollupTables
-#   6. CreateExtraIndices     - optional (toggled by CREATE_INDICES below)
+#   6. CreateExtraIndices     - optional (toggled in config.yaml)
 #   7. LoadEventTables        - populate the CDM clinical event tables
 #
-# Usage:
+# Configuration is read from config.yaml (see project root).
+# CLI positional args override config.yaml values:
 #   Rscript scripts/03_etl.R [synthea_csv_dir] [duckdb_path] [vocab_dir]
-#
-# Defaults:
-#   synthea_csv_dir = data/synthea_output/csv
-#   duckdb_path     = data/omop.duckdb
-#   vocab_dir       = data/vocab
 #
 # Run from the project root.
 
-args <- commandArgs(trailingOnly = TRUE)
-synthea_csv_dir <- if (length(args) >= 1) args[[1]] else "data/synthea_output/csv"
-duckdb_path     <- if (length(args) >= 2) args[[2]] else "data/omop.duckdb"
-vocab_dir       <- if (length(args) >= 3) args[[3]] else "data/vocab"
-
-# Reproduce the locked R environment (see scripts/00_setup_renv.R).
-if (file.exists("renv.lock") && requireNamespace("renv", quietly = TRUE)) {
-  renv::restore(prompt = FALSE)
+if (!requireNamespace("yaml", quietly = TRUE)) {
+  stop("R package 'yaml' is required. Run scripts/00_setup_renv.R first.", call. = FALSE)
 }
+cfg <- yaml::read_yaml("config.yaml", eval.expr = FALSE)
+
+args <- commandArgs(trailingOnly = TRUE)
+synthea_csv_dir <- if (length(args) >= 1) args[[1]] else cfg$etl$synthea_csv_dir
+duckdb_path     <- if (length(args) >= 2) args[[2]] else cfg$etl$duckdb_path
+vocab_dir       <- if (length(args) >= 3) args[[3]] else cfg$etl$vocab_dir
+CREATE_INDICES  <- as.logical(cfg$etl$create_indices %||% FALSE)
+cdmVersion      <- cfg$etl$cdm_version %||% "5.4"
+syntheaVersion  <- cfg$etl$synthea_version %||% "3.3.0"
 
 # --- Preconditions ---------------------------------------------------------
 if (!dir.exists(synthea_csv_dir) ||
@@ -43,6 +42,11 @@ if (!dir.exists(synthea_csv_dir) ||
   stop(sprintf(
     "Synthea CSV directory '%s' is missing or has no patients.csv. Run stage 2 first.",
     synthea_csv_dir))
+}
+
+# Reproduce the locked R environment (see scripts/00_setup_renv.R).
+if (file.exists("renv.lock") && requireNamespace("renv", quietly = TRUE)) {
+  renv::restore(prompt = FALSE)
 }
 
 # Athena vocabulary files are required by LoadVocabFromCsv. They are NOT bundled
@@ -82,15 +86,9 @@ connectionDetails$extraSettings <- list(
 
 cdmSchema      <- "main"
 syntheaSchema  <- "main"
-cdmVersion     <- "5.4"
-syntheaVersion <- "3.3.0"
 
 # Athena exports are tab-delimited despite the .csv extension.
 vocab_delimiter <- "\t"
-
-# Toggle creation of extra (non-essential) indices. They speed up downstream
-# queries but lengthen the ETL; disabled by default for a fast first build.
-CREATE_INDICES <- as.logical(Sys.getenv("CREATE_INDICES", "FALSE"))
 
 log_step <- function(msg) message(sprintf("[%s] %s", format(Sys.time(), "%H:%M:%S"), msg))
 

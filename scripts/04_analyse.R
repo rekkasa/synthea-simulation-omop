@@ -16,19 +16,22 @@
 #
 # Concept ids are resolved at runtime from the loaded vocabulary by their
 # source codes (SNOMED / LOINC / RxNorm), so the script does not hard-code
-# OMOP concept ids that might differ between vocabulary releases. Where a
-# concept or domain has no data, that section is reported as empty rather than
-# failing.
+# OMOP concept ids that might differ between vocabulary releases.
 #
-# Outputs (CSV) are written to results/.
-#
-# Usage:
+# Configuration is read from config.yaml (see project root).
+# CLI positional arg overrides the duckdb_path:
 #   Rscript scripts/04_analyse.R [duckdb_path]
 #
-# Default duckdb_path = data/omop.duckdb. Run from the project root.
+# Run from the project root.
+
+if (!requireNamespace("yaml", quietly = TRUE)) {
+  stop("R package 'yaml' is required. Run scripts/00_setup_renv.R first.", call. = FALSE)
+}
+cfg <- yaml::read_yaml("config.yaml", eval.expr = FALSE)
 
 args <- commandArgs(trailingOnly = TRUE)
-duckdb_path <- if (length(args) >= 1) args[[1]] else "data/omop.duckdb"
+duckdb_path <- if (length(args) >= 1) args[[1]] else cfg$etl$duckdb_path
+results_dir <- cfg$analysis$results_dir %||% "results"
 
 if (file.exists("renv.lock") && requireNamespace("renv", quietly = TRUE)) {
   renv::restore(prompt = FALSE)
@@ -44,7 +47,6 @@ suppressPackageStartupMessages({
   library(readr)
 })
 
-results_dir <- "results"
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 
 # Open read-write. DuckDB read-only connections can fail to see data if the

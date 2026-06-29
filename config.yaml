@@ -1,0 +1,36 @@
+# Synthea -> OMOP RA Pipeline Configuration
+# ==========================================
+# All tunable parameters for the five-stage pipeline.
+# Override any value by editing this file, or pass CLI arguments to individual
+# scripts (CLI args take precedence over this file).
+#
+# Shell scripts read values via:  scripts/lib/read_config.R <key.path>
+# R scripts load this file directly with the 'yaml' package.
+
+# --- Synthea JAR download (stage 1) -----------------------------------------
+synthea:
+  version: "3.3.0"
+  jar_dir: "tools"
+
+# --- Patient simulation (stage 2) -------------------------------------------
+simulation:
+  n_patients: 10
+  seed: 20240101
+  state: "Massachusetts"
+  age_min: 45
+  age_max: 120
+  max_iterations: 50
+  module_dir: "config/modules"
+
+# --- ETL to OMOP CDM (stage 3) ----------------------------------------------
+etl:
+  synthea_csv_dir: "data/synthea_output/csv"
+  duckdb_path: "data/omop.duckdb"
+  vocab_dir: "data/vocab"
+  cdm_version: "5.4"
+  synthea_version: "3.3.0"
+  create_indices: false
+
+# --- Analysis and output (stage 4) ------------------------------------------
+analysis:
+  results_dir: "results"
