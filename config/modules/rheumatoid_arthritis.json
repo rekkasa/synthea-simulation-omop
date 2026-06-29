@@ -123,6 +123,17 @@
           "display": "Rheumatoid arthritis"
         }
       ],
+      "direct_transition": "Mark_RA_History"
+    },
+    "Mark_RA_History": {
+      "type": "SetAttribute",
+      "attribute": "had_ra",
+      "value": true,
+      "remarks": [
+        "Set a persistent flag so the Synthea keep module can identify patients",
+        "who were ever diagnosed with RA, even if the condition later enters",
+        "remission via the RA_Ends path."
+      ],
       "direct_transition": "RA_Diagnosis"
     },
     "RA_Diagnosis": {
