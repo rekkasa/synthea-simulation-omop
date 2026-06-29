@@ -5,18 +5,20 @@
 # Stage 4 of the Synthea -> OMOP pipeline.
 #
 # Reads the OMOP CDM v5.4 DuckDB database produced by stage 3 and produces three
-# analyses for the rheumatoid-arthritis (RA) cohort:
+# analyses for the disease cohort:
 #
 #   1. Comorbidity profiling   - prevalence of cardiovascular disease,
 #                                osteoporosis, depression and diabetes.
 #   2. Disease progression     - longitudinal inflammatory markers (CRP, ESR)
-#                                relative to each patient's RA index date.
+#                                relative to each patient's index date.
 #   3. Treatment patterns      - DMARD / biologic exposures, first-line agent,
 #                                and time-to-first-treatment from the index date.
 #
-# Concept ids are resolved at runtime from the loaded vocabulary by their
-# source codes (SNOMED / LOINC / RxNorm), so the script does not hard-code
-# OMOP concept ids that might differ between vocabulary releases.
+# The target disease SNOMED code is read from config.yaml
+# (simulation.disease_snomed_code). Concept ids are resolved at runtime from
+# the loaded vocabulary by their source codes (SNOMED / LOINC / RxNorm), so the
+# script does not hard-code OMOP concept ids that might differ between
+# vocabulary releases.
 #
 # Configuration is read from config.yaml (see project root).
 # CLI positional arg overrides the duckdb_path:
@@ -32,6 +34,8 @@ cfg <- yaml::read_yaml("config.yaml", eval.expr = FALSE)
 args <- commandArgs(trailingOnly = TRUE)
 duckdb_path <- if (length(args) >= 1) args[[1]] else cfg$etl$duckdb_path
 results_dir <- cfg$analysis$results_dir %||% "results"
+disease_snomed <- cfg$simulation$disease_snomed_code %||% "69896004"
+disease_display <- cfg$simulation$disease_display %||% "the target disease"
 
 if (file.exists("renv.lock") && requireNamespace("renv", quietly = TRUE)) {
   renv::restore(prompt = FALSE)
@@ -91,30 +95,33 @@ resolve_ingredients <- function(con, names) {
 # Comma-separated list of an SQL integer set, for IN (...) clauses.
 int_set <- function(ids) paste(ids, collapse = ", ")
 
-# --- RA cohort -------------------------------------------------------------
-# Cohort = persons with any condition that is RA or a descendant of RA in the
-# vocabulary hierarchy (e.g. seropositive RA). Index date = earliest such
+# --- Disease cohort ---------------------------------------------------------
+# Cohort = persons with any condition that is the target disease or a
+# descendant of it in the vocabulary hierarchy. Index date = earliest such
 # condition_start_date.
-ra_concept <- resolve_standard_concept(con, "69896004", "SNOMED")
-if (is.na(ra_concept)) {
-  stop("Could not resolve the standard concept for Rheumatoid arthritis (SNOMED 69896004). ",
+disease_concept <- resolve_standard_concept(con, disease_snomed, "SNOMED")
+if (is.na(disease_concept)) {
+  stop(sprintf("Could not resolve the standard concept for SNOMED %s. ",
+               disease_snomed),
        "Is the vocabulary loaded?")
 }
-log_step(sprintf("RA standard concept_id = %d", ra_concept))
+log_step(sprintf("Disease standard concept_id = %d  (SNOMED %s)",
+                 disease_concept, disease_snomed))
 
 DBI::dbExecute(con, sprintf("
-  CREATE TEMP TABLE ra_cohort AS
+  CREATE TEMP TABLE disease_cohort AS
   SELECT co.person_id, MIN(co.condition_start_date) AS index_date
   FROM condition_occurrence co
   WHERE co.condition_concept_id IN (
     SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = %d
   )
-  GROUP BY co.person_id", ra_concept))
+  GROUP BY co.person_id", disease_concept))
 
-cohort_n <- DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM ra_cohort")$n
-log_step(sprintf("RA cohort size = %d persons", cohort_n))
+cohort_n <- DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM disease_cohort")$n
+log_step(sprintf("Cohort size = %d persons (%s)", cohort_n, disease_display))
 if (cohort_n == 0) {
-  stop("RA cohort is empty - no RA conditions found in CONDITION_OCCURRENCE.")
+  stop(sprintf("Cohort is empty - no conditions found in CONDITION_OCCURRENCE for %s.",
+               disease_display))
 }
 
 # ===========================================================================
@@ -139,7 +146,7 @@ comorbidity_rows <- lapply(names(comorbidities), function(label) {
   }
   n_with <- DBI::dbGetQuery(con, sprintf("
     SELECT COUNT(DISTINCT rc.person_id) AS n
-    FROM ra_cohort rc
+    FROM disease_cohort rc
     JOIN condition_occurrence co ON co.person_id = rc.person_id
     WHERE co.condition_concept_id IN (
       SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = %d
@@ -185,7 +192,7 @@ if (length(marker_ids) == 0) {
            CAST(m.measurement_date - rc.index_date AS INTEGER) AS days_from_index,
            m.value_as_number
     FROM measurement m
-    JOIN ra_cohort rc ON rc.person_id = m.person_id
+    JOIN disease_cohort rc ON rc.person_id = m.person_id
     WHERE m.measurement_concept_id IN (%s)
     ORDER BY m.person_id, m.measurement_date", int_set(unname(marker_ids))))
   disease_progression <- merge(disease_progression, label_map,
@@ -209,7 +216,7 @@ ing_class <- c(setNames(rep("DMARD", length(dmards)), dmards),
 ingredients <- resolve_ingredients(con, names(ing_class))
 
 if (nrow(ingredients) == 0) {
-  log_step("No RA treatment ingredients found; writing empty treatment tables.")
+  log_step("No treatment ingredients found; writing empty treatment tables.")
   treatment_exposures <- data.frame(
     person_id = integer(0), ingredient = character(0), drug_class = character(0),
     first_exposure_date = as.Date(character(0)), days_from_index = integer(0))
@@ -230,7 +237,7 @@ if (nrow(ingredients) == 0) {
              MIN(de.drug_exposure_start_date) AS first_exposure_date,
              CAST(MIN(de.drug_exposure_start_date) - rc.index_date AS INTEGER) AS days_from_index
       FROM drug_exposure de
-      JOIN ra_cohort rc ON rc.person_id = de.person_id
+      JOIN disease_cohort rc ON rc.person_id = de.person_id
       WHERE de.drug_concept_id IN (
         SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = %d
       )
@@ -248,7 +255,7 @@ if (nrow(ingredients) == 0) {
       first_exposure_date = as.Date(character(0)), days_from_index = integer(0))
   }
 
-  # Time to first RA treatment of any kind, per person.
+  # Time to first treatment of any kind, per person.
   if (nrow(treatment_exposures) > 0) {
     ord <- order(treatment_exposures$person_id, treatment_exposures$first_exposure_date)
     te <- treatment_exposures[ord, ]

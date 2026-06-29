@@ -457,6 +457,95 @@ load_event_tables_duckdb_fallback <- function(db_file) {
   ")
 }
 
+# DuckDB-native Synthea CSV loader.
+# Unlike ETL-SyntheaBuilder::LoadSyntheaTables (which reads every CSV into an
+# R data frame via DatabaseConnector), this uses DuckDB's read_csv() to stream
+# data directly from disk into the staging tables, keeping R memory near zero.
+# Duplicate column headers (e.g. claims_transactions.csv) are handled by
+# de-duplicating on read.
+load_synthea_duckdb_native <- function(db_file, csv_dir) {
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_file)
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+
+  table_map <- c(
+    patients            = "patients",
+    encounters          = "encounters",
+    conditions          = "conditions",
+    medications         = "medications",
+    procedures          = "procedures",
+    observations        = "observations",
+    immunizations       = "immunizations",
+    allergies           = "allergies",
+    careplans           = "careplans",
+    devices             = "devices",
+    supplies            = "supplies",
+    imaging_studies     = "imaging_studies",
+    organizations       = "organizations",
+    providers           = "providers",
+    payers              = "payers",
+    claims              = "claims",
+    claims_transactions = "claims_transactions"
+  )
+
+  for (base in names(table_map)) {
+    csv_path <- file.path(csv_dir, paste0(base, ".csv"))
+    if (!file.exists(csv_path)) {
+      log_step(sprintf("  SKIP %s (file not found)", basename(csv_path)))
+      next
+    }
+    tbl <- table_map[[base]]
+    log_step(sprintf("  Loading %s -> %s", basename(csv_path), tbl))
+
+    # Read header line to discover column names.
+    header_line <- readLines(csv_path, n = 1L, warn = FALSE)
+    raw_cols <- strsplit(header_line, ",")[[1]]
+    raw_cols <- gsub('^"|"$', '', raw_cols)
+
+    # Build position -> name map, skipping duplicate names.
+    names_vec <- character(0)
+    non_dup_idx <- integer(0)
+    for (i in seq_along(raw_cols)) {
+      name <- raw_cols[i]
+      if (name %in% names_vec) next
+      names_vec <- c(names_vec, name)
+      non_dup_idx <- c(non_dup_idx, i)
+    }
+
+    # Column aliases: column01, column02, ...
+    pos_names <- sprintf("column%02d", seq_along(raw_cols))
+    pos_list  <- paste(pos_names, collapse = ", ")
+
+    # Build SELECT: column01 AS "name1", column02 AS "name2", ...
+    select_parts <- sapply(non_dup_idx, function(i) {
+      sprintf("%s AS \"%s\"", pos_names[i], raw_cols[i])
+    })
+    select_sql <- paste(select_parts, collapse = ", ")
+
+    sql <- sprintf("
+      INSERT INTO %s
+      SELECT %s
+      FROM read_csv('%s',
+        header  = false,
+        auto_detect = true,
+        null_padding = true,
+        ignore_errors = true,
+        names = [%s]
+      )", tbl, select_sql, csv_path, pos_list)
+
+    n <- tryCatch(
+      DBI::dbExecute(con, sql),
+      error = function(e) {
+        warning(sprintf("  Native load failed for %s: %s",
+                        basename(csv_path), e$message), call. = FALSE)
+        0L
+      }
+    )
+    log_step(sprintf("    %d rows inserted", n))
+  }
+
+  log_step("  Synthea staging load complete (DuckDB-native).")
+}
+
 # --- ETL sequence ----------------------------------------------------------
 log_step("1/7 CreateCDMTables (CDM v5.4)")
 ETLSyntheaBuilder::CreateCDMTables(
@@ -472,50 +561,8 @@ ETLSyntheaBuilder::CreateSyntheaTables(
   syntheaVersion    = syntheaVersion
 )
 
-log_step(sprintf("3/7 LoadSyntheaTables from %s", synthea_csv_dir))
-log_step("    (duplicate CSV headers will be sanitized to a temp copy)")
-
-# Synthea v3.3.0 can emit CSVs with duplicate column headers (notably
-# claims_transactions.csv). DatabaseConnector/DuckDB rejects these when
-# registering the R data frame. Work on a sanitized copy of the CSV directory
-# so the original Synthea output is preserved.
-sanitize_csv_dir <- function(src_dir) {
-  dst_dir <- file.path(tempdir(), paste0("synthea_csv_sanitized_", Sys.getpid()))
-  if (dir.exists(dst_dir)) unlink(dst_dir, recursive = TRUE)
-  dir.create(dst_dir, recursive = TRUE, showWarnings = FALSE)
-
-  files <- list.files(src_dir, pattern = "\\.csv$", full.names = TRUE)
-  for (f in files) {
-    header <- tryCatch(readLines(f, n = 1), error = function(e) NULL)
-    out_file <- file.path(dst_dir, basename(f))
-
-    if (is.null(header) || length(header) == 0) {
-      file.copy(f, out_file)
-      next
-    }
-
-    cols <- strsplit(header, ",")[[1]]
-    cols <- gsub('^"|"$', "", cols)
-    if (anyDuplicated(cols) == 0) {
-      file.copy(f, out_file)
-      next
-    }
-
-    message(sprintf("  Sanitizing duplicate headers in %s", basename(f)))
-    df <- utils::read.csv(f, check.names = FALSE, stringsAsFactors = FALSE)
-    df <- df[, !duplicated(names(df)), drop = FALSE]
-    utils::write.csv(df, out_file, row.names = FALSE, quote = TRUE)
-  }
-  dst_dir
-}
-
-synthea_csv_dir_sanitized <- sanitize_csv_dir(synthea_csv_dir)
-
-ETLSyntheaBuilder::LoadSyntheaTables(
-  connectionDetails = connectionDetails,
-  syntheaSchema     = syntheaSchema,
-  syntheaFileLoc    = synthea_csv_dir_sanitized
-)
+log_step(sprintf("3/7 LoadSyntheaTables from %s (DuckDB-native)", synthea_csv_dir))
+load_synthea_duckdb_native(duckdb_path, synthea_csv_dir)
 
 # DuckDB + SqlRender schema-qualification bug: when syntheaSchema = "main",
 # LoadSyntheaTables may insert into tables literally named "main.patients"
