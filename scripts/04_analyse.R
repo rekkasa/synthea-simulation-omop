@@ -47,7 +47,10 @@ suppressPackageStartupMessages({
 results_dir <- "results"
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
 
-con <- DBI::dbConnect(duckdb::duckdb(), dbdir = duckdb_path, read_only = TRUE)
+# Open read-write. DuckDB read-only connections can fail to see data if the
+# previous writer did not fully checkpoint the file. The script does not modify
+# CDM tables; it only reads and creates temporary tables.
+con <- DBI::dbConnect(duckdb::duckdb(), dbdir = duckdb_path)
 on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
 
 log_step <- function(msg) message(sprintf("[%s] %s", format(Sys.time(), "%H:%M:%S"), msg))

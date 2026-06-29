@@ -5,44 +5,41 @@
 # One-time R environment setup for the ETL (stage 3) and analysis (stage 4)
 # scripts. Run this once before the first pipeline run.
 #
-# A valid renv.lock cannot be hand-authored (it records exact package versions
-# and content hashes), so this script generates it: it initialises an renv
-# project, installs the required packages at their current CRAN / GitHub
-# versions, and snapshots them into renv.lock. Subsequent runs of 03_etl.R and
-# 04_analyse.R call renv::restore() to reproduce this exact environment.
-#
 # Usage:
 #   Rscript scripts/00_setup_renv.R
 #
 # Run from the project root.
 
-repos <- "https://cloud.r-project.org"
+repos <- c(
+  P3M = "https://packagemanager.posit.co/cran/__linux__/noble/latest",
+  CRAN = "https://cloud.r-project.org"
+)
+options(repos = repos)
+
+Sys.setenv(JAVA_HOME = "/usr/lib/jvm/java-21-openjdk-amd64")
+Sys.setenv(MAKEFLAGS = "-j2")
 
 if (!requireNamespace("renv", quietly = TRUE)) {
-  install.packages("renv", repos = repos)
+  install.packages("renv")
 }
 
-# Initialise an renv project in the current directory without trying to
-# auto-discover dependencies (we declare them explicitly below).
 if (!file.exists("renv/activate.R")) {
   renv::init(bare = TRUE, restart = FALSE)
 }
 
+# Install from binary repos first (pre-compiled, fast), falling back to
+# source for any package not available as a binary.
 cran_packages <- c(
-  "DatabaseConnector",  # ETL backend abstraction (used with the duckdb driver)
-  "duckdb",             # embedded analytical database / OMOP CDM backend
-  "DBI",                # database interface used by the analysis stage
-  "dplyr",
-  "dbplyr",
-  "tidyr",
-  "lubridate",
-  "readr",
-  "glue"
+  "DatabaseConnector", "duckdb", "DBI",
+  "dplyr", "dbplyr", "tidyr", "lubridate", "readr", "glue"
 )
 
-renv::install(cran_packages)
+renv::install(cran_packages, type = "binary")
 
-# ETL-Synthea ships the package as 'ETLSyntheaBuilder' from GitHub.
+# rJava needs source install with JAVA_HOME set.
+renv::install("rJava")
+
+# ETL-Synthea from GitHub (source only, but no C++ compilation).
 renv::install("OHDSI/ETL-Synthea")
 
 renv::snapshot(prompt = FALSE)
